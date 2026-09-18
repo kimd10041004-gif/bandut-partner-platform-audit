@@ -1,0 +1,92 @@
+/* 반듯집수리 파트너 — 디자인 토큰 (28-10-03)
+   브랜드·상태 색, 타입 스케일, 형태는 전부 여기서만 바꾼다. */
+
+:root {
+  /* ═══ 1계층: 팔레트 (28-12-01, seed-design 구조 차용)
+     원색 스케일 — 리브랜딩은 이 계층만 바꾼다. 컴포넌트에서 직접 참조 금지. ═══ */
+  --palette-navy-900: #0a1f36;
+  --palette-navy-800: #0e2a47;
+  --palette-navy-700: #16395e;
+  --palette-teal-600: #15695a;
+  --palette-teal-700: #0e5347;
+  --palette-teal-100: #e3f1ed;
+  --palette-gray-0: #ffffff;
+  --palette-gray-25: #fafbfc;
+  --palette-gray-50: #f5f6f8;
+  --palette-gray-200: #e5e9ef;
+  --palette-gray-300: #d5dbe4;
+  --palette-gray-500: #6b7787;
+  --palette-gray-700: #3d4a5c;
+  --palette-gray-900: #17212e;
+  --palette-blue-600: #2360d8;
+  --palette-blue-100: #e9effb;
+  --palette-green-700: #177245;
+  --palette-green-100: #e5f3ec;
+  --palette-amber-700: #a85b0a;
+  --palette-amber-100: #fcf0e1;
+  --palette-red-700: #b32424;
+  --palette-red-100: #fceceb;
+  --palette-slate-500: #66707d;
+  --palette-slate-100: #eef1f4;
+
+  /* ═══ 2계층: 시맨틱 (컴포넌트가 참조하는 유일한 계층)
+     28-90: 라이트 단일 테마다(다크 모드 제거). ═══ */
+  /* 브랜드 */
+  --navy-900: var(--palette-navy-900);
+  --navy-800: var(--palette-navy-800);
+  --navy-700: var(--palette-navy-700);
+  --brand: var(--palette-teal-600);
+  --brand-strong: var(--palette-teal-700);
+  --brand-soft: var(--palette-teal-100);
+  --brand-glow: rgba(21, 105, 90, 0.16);
+  /* 서피스 */
+  --bg: var(--palette-gray-50);
+  --card: var(--palette-gray-0);
+  --surface-2: var(--palette-gray-25);
+  --ink: var(--palette-gray-900);
+  --ink-2: var(--palette-gray-700);
+  --muted: var(--palette-gray-500);
+  --line: var(--palette-gray-200);
+  --line-strong: var(--palette-gray-300);
+  /* 상태 (시안 상태 가이드) */
+  --st-blue: var(--palette-blue-600);
+  --st-blue-bg: var(--palette-blue-100);
+  --st-green: var(--palette-green-700);
+  --st-green-bg: var(--palette-green-100);
+  --st-amber: var(--palette-amber-700);
+  --st-amber-bg: var(--palette-amber-100);
+  --st-red: var(--palette-red-700);
+  --st-red-bg: var(--palette-red-100);
+  --st-gray: var(--palette-slate-500);
+  --st-gray-bg: var(--palette-slate-100);
+  /* 형태 */
+  --radius: 14px;
+  --radius-sm: 9px;
+  --shadow-1: 0 1px 2px rgba(10, 31, 54, 0.05), 0 1px 1px rgba(10, 31, 54, 0.03);
+  --shadow-2: 0 2px 6px rgba(10, 31, 54, 0.07), 0 10px 28px rgba(10, 31, 54, 0.08);
+  /* 간격 스케일 (28-13-01) — 여백은 이 스케일 우선. 컴포넌트 고유 미세값(홀수 px 등)은 잔류 허용 */
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-5: 20px;
+  --sp-6: 24px;
+  /* 모션 (28-13-01) — 기존 값 그대로 토큰화 */
+  --dur-press: 0.12s;
+  --dur-fast: 0.15s;
+  --dur-base: 0.18s;
+  --dur-slow: 0.2s;
+  /* 타입 스케일 (28-9-01) */
+  --fs-caption: 12px;
+  --fs-body: 13.5px;
+  --fs-title: 15px;
+  --fs-head: 18px;
+  --fs-display: 23px;
+  /* 서피스 파생 토큰 */
+  --tabs-bg: rgba(255, 255, 255, 0.86);
+  --field-bg: var(--palette-gray-0);
+  --danger-border: #efc7c5;
+  color-scheme: light;
+}
+
+/* 28-90: 라이트 단일 테마 — 다크 모드는 참고 v12 대조에서 제거했다 */

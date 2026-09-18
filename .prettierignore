@@ -1,0 +1,8 @@
+node_modules/
+dist/
+build/
+visual-out/
+docs/
+public/
+package-lock.json
+*.md

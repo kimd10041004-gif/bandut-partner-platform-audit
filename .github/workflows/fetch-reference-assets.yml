@@ -1,0 +1,101 @@
+# 29-7: 시안의 이미지를 우리 저장소로 가져온다.
+#
+# 29-6 은 화면 안의 404 를 없애려고 시안이 부르는 파일 이름을 우리 브랜드 파일 이름으로
+# 바꿔 달았다. 그러면 404 는 사라지지만 **사진 자체가 다른 것이 된다** — 시안과 똑같이
+# 보이게 하기로 정했으니, 이름을 바꾸는 대신 없는 파일을 채운다.
+#
+# 개발 컨테이너에서는 시안 주소로 나갈 수 없다(프록시). Actions 는 나갈 수 있다.
+# 받은 것이 정말 이미지인지 확인한 뒤에만 커밋한다 — 로그인 페이지 HTML 을 이미지라고
+# 저장소에 넣는 일이 없도록.
+name: fetch-reference-assets
+
+on:
+  push:
+    paths:
+      - '.github/workflows/fetch-reference-assets.yml'
+  workflow_dispatch:
+    inputs:
+      reference_url:
+        description: '시안 주소 (비우면 기본 시안)'
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: fetch-reference-assets
+  cancel-in-progress: false
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref_name }}
+
+      - name: 시안 이미지를 받아 확인하고 커밋한다
+        env:
+          REF: ${{ inputs.reference_url || 'https://bandeut-marketplace.kimd10041004.chatgpt.site' }}
+        run: |
+          set -uo pipefail
+          base="${REF%/}"
+          bad=0
+
+          # 시안이 부르는 경로 그대로 저장한다. 그래야 화면 코드를 v17 원본으로 되돌릴 수 있다.
+          # /favicon.svg 는 app/layout.tsx 가 부르는데 저장소에 없었다 — 탭 아이콘이 모든
+          # 화면에서 404 였다. src="/…" 만 보는 가드는 metadata.icons 를 못 본다.
+          for path in /brand/logo.png /home-interior.webp /brand/inspection.webp /partner-background.webp /favicon.svg; do
+            dest="public${path}"
+            mkdir -p "$(dirname "$dest")"
+            code="$(curl -sSL --max-time 60 -o "$dest.tmp" -w '%{http_code}' "$base$path" || echo 000)"
+            if [ "$code" != "200" ]; then
+              echo "::error::$path 가 HTTP $code 입니다"; bad=$((bad + 1)); rm -f "$dest.tmp"; continue
+            fi
+            kind="$(file -b --mime-type "$dest.tmp")"
+            size="$(stat -c%s "$dest.tmp")"
+            # SVG 는 file 이 text/xml·text/plain 으로 보기도 한다. 그때는 내용으로 판별한다.
+            min=1000
+            case "$path" in
+              *.svg)
+                min=200
+                if ! grep -qi '<svg' "$dest.tmp"; then
+                  echo "::error::$path 가 SVG 가 아닙니다 ($kind) — 저장하지 않습니다"
+                  bad=$((bad + 1)); rm -f "$dest.tmp"; continue
+                fi ;;
+              *)
+                case "$kind" in
+                  image/*) ;;
+                  *) echo "::error::$path 가 이미지가 아닙니다 ($kind) — 저장하지 않습니다"
+                     bad=$((bad + 1)); rm -f "$dest.tmp"; continue ;;
+                esac ;;
+            esac
+            if [ "$size" -lt "$min" ]; then
+              echo "::error::$path 가 너무 작습니다 ($size 바이트) — 저장하지 않습니다"
+              bad=$((bad + 1)); rm -f "$dest.tmp"; continue
+            fi
+            mv "$dest.tmp" "$dest"
+            echo "받음: $path → $dest ($kind, $size 바이트)"
+          done
+
+          if [ "$bad" -gt 0 ]; then
+            echo "$bad 개를 못 받았습니다 — 아무것도 커밋하지 않습니다"
+            git checkout -- public 2>/dev/null || true
+            exit 1
+          fi
+
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add public
+          if git diff --cached --quiet; then
+            echo "바뀐 것이 없습니다"
+            exit 0
+          fi
+          git commit \
+            -m '29-7: 시안 이미지 네 개를 저장소로 (자동)' \
+            -m '시안이 부르는 경로 그대로 넣는다. 이름을 바꾸지 않으므로 화면 코드를 v17 원본으로 되돌릴 수 있고, 그러면 시안과 같은 사진이 같은 자리에 보인다.' \
+            -m '받은 것이 이미지인지(MIME)와 1000 바이트를 넘는지 확인한 뒤에만 저장했다.'
+          git push origin "HEAD:${GITHUB_REF_NAME}"
+          echo "커밋했습니다"

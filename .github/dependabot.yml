@@ -1,0 +1,10 @@
+# 28-66: 저장소에 package-lock.json이 하나뿐이다.
+# 28-65까지는 라운드마다 락파일을 복사해서, 40개의 낡은 사본이 취약점 알림 200건
+# (critical 40 · high 40 · moderate 120)을 만들고 살아 있는 코드의 신호를 덮고 있었다.
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 3

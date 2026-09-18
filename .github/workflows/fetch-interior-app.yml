@@ -1,0 +1,168 @@
+# 29-8: 시안의 공간 스튜디오(/interior/)를 통째로 우리 저장소로 가져온다.
+#
+# 화면 다섯 자리가 /interior/ 를 부르는데(헤더 메뉴 · 홈 카드 · 하단 탭 · 요청 화면 · 푸터)
+# 우리 쪽은 404 다. 시안에는 200 이고, 빌드 없는 정적 앱(HTML + JS + 에셋)이라 파일만
+# 가져오면 그대로 선다.
+#
+# **파일 목록을 모른다.** index.html 에서 시작해 받은 텍스트 안의 /interior/ 참조를 따라가며
+# 더 받는다. GET 뿐이고 시안 쪽에는 아무것도 쓰지 않는다.
+name: fetch-interior-app
+
+on:
+  push:
+    paths:
+      - '.github/workflows/fetch-interior-app.yml'
+  workflow_dispatch:
+    inputs:
+      reference_url:
+        description: '시안 주소 (비우면 기본 시안)'
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: fetch-interior-app
+  cancel-in-progress: false
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref_name }}
+
+      - name: 크롤해서 받고 목록을 적는다
+        env:
+          REF: ${{ inputs.reference_url || 'https://bandeut-marketplace.kimd10041004.chatgpt.site' }}
+        run: |
+          set -uo pipefail
+          python3 - <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
+          import os, re, subprocess, posixpath
+
+          base = os.environ['REF'].rstrip('/')
+          ROOT = '/interior/'
+          MAX = 200
+          out_dir = 'public'
+
+          def get(path):
+              r = subprocess.run(
+                  ['curl', '-sSL', '--max-time', '60', '-w', '%{http_code}',
+                   '-o', '/tmp/asset.bin', base + path],
+                  capture_output=True, text=True, timeout=120)
+              code = (r.stdout or '').strip()[-3:]
+              try:
+                  body = open('/tmp/asset.bin', 'rb').read()
+              except Exception:
+                  body = b''
+              return code, body
+
+          TEXT_EXT = ('.html', '.htm', '.js', '.mjs', '.css', '.json', '.svg', '.map')
+          ASSET = r'js|mjs|css|png|jpe?g|webp|svg|gif|ico|json|glb|gltf|woff2?|ttf|mp4|webm'
+
+          def refs(text, cur):
+              found = set()
+              # 확장자 뒤에 ?v=3 · #frag 가 붙어 있어도 잡는다 — 캐시 무효화로 흔하다.
+              pat = r'["\'(]([^"\'()\s>]+\.(?:' + ASSET + r')(?:[?#][^"\'()\s>]*)?)["\')]'
+              for m in re.finditer(pat, text):
+                  raw = m.group(1)
+                  if raw.startswith(('http://', 'https://', 'data:', '//')):
+                      continue
+                  p = raw if raw.startswith('/') else posixpath.normpath(
+                      posixpath.join(posixpath.dirname(cur), raw))
+                  if p.startswith(ROOT):
+                      found.add(p.split('?')[0].split('#')[0])
+              return found
+
+          # 정적 스캔이 못 보는 것. materials.js 가 이렇게 만든다:
+          #     ['oak','linen'].map(name => new URL(`./assets/${name}.png`, import.meta.url))
+          # 이름이 코드 안에서 조립되므로 따옴표 속 경로를 찾는 방식으로는 안 잡힌다. 브라우저로
+          # 열어 보고서야 404 가 드러났다. 여기에 적어 두고, 진짜 안전망은 e2e:next 가 실제로
+          # 열어 4xx 가 하나도 없는지 보는 것이다.
+          EXTRA = [ROOT + 'assets/oak.png', ROOT + 'assets/linen.png']
+
+          seen, queue, saved, bad = set(), [ROOT + 'index.html'] + EXTRA, [], []
+          while queue and len(saved) < MAX:
+              path = queue.pop(0)
+              if path in seen:
+                  continue
+              seen.add(path)
+              code, body = get(path)
+              if code != '200' or not body:
+                  bad.append((path, code, len(body)))
+                  continue
+              # 시안 호스트(Cloudflare)가 HTML 에 봇 관리 스크립트를 주입한다. 앱의 일부가 아니고
+              # /cdn-cgi/ 는 우리 배포에 없다. 여기서 걷어내지 않으면 이 워크플로를 돌릴 때마다
+              # 되살아나 커밋 충돌을 만든다 — 실제로 한 번 그랬다.
+              if path.endswith(('.html', '.htm')):
+                  doc = body.decode('utf-8', 'replace')
+                  doc, n = re.subn(
+                      r'<script>\(function\(\)\{[^<]*?__CF\$cv\$params[^<]*?\}\)\(\);</script>', '', doc)
+                  if n:
+                      print(f'  (Cloudflare 주입 스크립트 {n}개 제거: {path})')
+
+                  # 29-9: 탭 아이콘을 사이트와 하나로. 시안은 여기서 903KB 짜리 로고 PNG 를
+                  # 쓰는데, 글자까지 든 그림이라 16px 탭에서는 읽히지 않고 사이트 본체와도
+                  # 다른 아이콘이 된다. 본체가 쓰는 /favicon.svg 로 맞춘다.
+                  doc, m = re.subn(
+                      r'<link rel="icon"[^>]*>',
+                      '<link rel="icon" type="image/svg+xml" href="/favicon.svg">', doc)
+                  if m:
+                      print(f'  (탭 아이콘 {m}개를 /favicon.svg 로: {path})')
+
+                  if n or m:
+                      body = doc.encode('utf-8')
+
+              dest = os.path.join(out_dir, path.lstrip('/'))
+              os.makedirs(os.path.dirname(dest), exist_ok=True)
+              with open(dest, 'wb') as f:
+                  f.write(body)
+              saved.append((path, len(body)))
+              if path.endswith(TEXT_EXT):
+                  text = body.decode('utf-8', 'replace')
+                  for p in sorted(refs(text, path)):
+                      if p not in seen:
+                          queue.append(p)
+
+          print('# 공간 스튜디오 가져오기')
+          print()
+          print(f'- 시안: {base}{ROOT}')
+          print(f'- 받은 파일 {len(saved)}개 · 못 받은 것 {len(bad)}개')
+          print()
+          print('| 파일 | 바이트 |')
+          print('| --- | ---: |')
+          for p, n in saved:
+              print(f'| `{p}` | {n:,} |')
+          if bad:
+              print()
+              print('| 못 받음 | HTTP | 바이트 |')
+              print('| --- | --- | ---: |')
+              for p, c, n in bad:
+                  print(f'| `{p}` | {c} | {n} |')
+
+          if not any(p.endswith('index.html') for p, _ in saved):
+              raise SystemExit('index.html 을 못 받았습니다 — 중단합니다')
+          PY
+          rc=${PIPESTATUS[0]}
+          if [ "$rc" -ne 0 ]; then
+            rm -rf public/interior
+            echo "받기에 실패했습니다 — 아무것도 커밋하지 않습니다"
+            exit 1
+          fi
+
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add public/interior
+          if git diff --cached --quiet; then
+            echo "바뀐 것이 없습니다"
+            exit 0
+          fi
+          git commit \
+            -m '29-8: 공간 스튜디오 파일을 저장소로 (자동)' \
+            -m '시안의 /interior/ 를 index.html 에서 시작해 크롤해 받았다. 받은 목록은 이 실행의 Summary 와 로그에 있다.' \
+            -m '아직 서빙 배선은 하지 않았다 — 파일만 넣는다.'
+          git push origin "HEAD:${GITHUB_REF_NAME}"
+          echo "커밋했습니다"

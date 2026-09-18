@@ -1,0 +1,1 @@
+ALTER TABLE `refunds` ADD `prior_refunded` integer DEFAULT 0 NOT NULL;

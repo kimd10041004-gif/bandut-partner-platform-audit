@@ -1,0 +1,141 @@
+# 29-6-C: 시안과 우리 화면을 같은 자리에서 나란히 읽는다.
+#
+# v17 시안은 사장님이 준 주소에 살아 있고, 우리 화면은 프리뷰에 있다. 둘 다 개발 컨테이너의
+# 네트워크 밖이라 여기서는 볼 수 없다 — GitHub Actions 는 볼 수 있다.
+#
+# **읽기만 한다.** GET 뿐이고 시안 쪽에는 아무것도 쓰지 않는다. 판정하지 않는다 — 무엇이
+# 다른지 적어 놓고 사람이 고를 수 있게 하는 것이 목적이라, 다르다고 실패로 세지 않는다.
+#
+# 29-7 부터는 이미지 목록도 같아야 한다 — 시안의 파일 다섯 개를 저장소로 가져오고 화면 코드를
+# v17 원본으로 되돌렸다. 그래도 이 워크플로는 여전히 판정하지 않는다.
+name: reference-compare
+
+# workflow_dispatch 는 기본 브랜치에 파일이 있어야 부를 수 있다. 이 파일은 아직 라운드
+# 브랜치에만 있으므로, 이 파일이 바뀌는 푸시에서도 돌게 해 둔다 — 그때는 아래 기본값을 쓴다.
+on:
+  push:
+    paths:
+      - '.github/workflows/reference-compare.yml'
+  workflow_dispatch:
+    inputs:
+      reference_url:
+        description: '시안 주소 (비우면 기본 시안)'
+        required: false
+        type: string
+      base_url:
+        description: '우리 주소 (비우면 프로덕션)'
+        required: false
+        type: string
+      paths:
+        description: '견줄 경로 (공백으로 나눔)'
+        required: false
+        default: '/ /request /services /notices /terms /privacy /marketplace-notice /start /interior/'
+        type: string
+
+concurrency:
+  group: reference-compare
+  cancel-in-progress: false
+
+jobs:
+  compare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: 두 쪽을 받아 나란히 적는다
+        env:
+          REF: ${{ inputs.reference_url || 'https://bandeut-marketplace.kimd10041004.chatgpt.site' }}
+          OURS: ${{ inputs.base_url || 'https://bandut-partner-platform-git-r-fe6a07-kimd10041004-gifs-projects.vercel.app' }}
+          PATHS: ${{ inputs.paths || '/ /request /services /notices /terms /privacy /marketplace-notice /start /interior/' }}
+        run: |
+          set -uo pipefail
+          python3 - <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
+          import os, re, html, subprocess, difflib, urllib.parse
+
+          ref = os.environ['REF'].rstrip('/')
+          ours = os.environ['OURS'].rstrip('/')
+          paths = os.environ['PATHS'].split()
+
+          def get(url):
+              try:
+                  out = subprocess.run(
+                      ['curl', '-sSL', '--max-time', '30', '-w', '\n@@CODE@@%{http_code}', url],
+                      capture_output=True, text=True, timeout=60)
+                  body = out.stdout
+                  code = body.rsplit('@@CODE@@', 1)[-1].strip() if '@@CODE@@' in body else '000'
+                  body = body.rsplit('\n@@CODE@@', 1)[0]
+                  return code, body
+              except Exception as e:
+                  return '000', ''
+
+          def title(doc):
+              m = re.search(r'<title[^>]*>(.*?)</title>', doc, re.S | re.I)
+              t = html.unescape(m.group(1)).strip() if m else '(없음)'
+              return t.replace('|', '·')
+
+          def text(doc):
+              d = re.sub(r'(?is)<(script|style|noscript)[^>]*>.*?</\1>', ' ', doc)
+              d = re.sub(r'(?s)<[^>]+>', '\n', d)
+              d = html.unescape(d)
+              lines = [re.sub(r'\s+', ' ', x).strip() for x in d.split('\n')]
+              return [x for x in lines if x]
+
+          def images(doc, base):
+              srcs = re.findall(r'src="([^"]+)"', doc)
+              out = []
+              for s in srcs:
+                  if s.startswith('/_next/') or s.startswith('data:'):
+                      continue
+                  if '/_next/image' in s:
+                      q = urllib.parse.parse_qs(urllib.parse.urlparse(s).query)
+                      s = urllib.parse.unquote(q.get('url', [s])[0])
+                  out.append(s)
+              seen, uniq = set(), []
+              for s in out:
+                  if s not in seen:
+                      seen.add(s); uniq.append(s)
+              return uniq
+
+          print('# 시안 대조')
+          print()
+          print(f'- 시안: {ref}')
+          print(f'- 우리: {ours}')
+          print()
+          print('| 경로 | 시안 HTTP | 우리 HTTP | 시안 제목 | 우리 제목 | 문장 차이 |')
+          print('| --- | --- | --- | --- | --- | --- |')
+
+          details = []
+          for p in paths:
+              rc, rb = get(ref + p)
+              oc, ob = get(ours + p)
+              rt, ot = text(rb), text(ob)
+              diff = [l for l in difflib.unified_diff(rt, ot, lineterm='', n=0)
+                      if l[:1] in '+-' and not l.startswith(('---', '+++'))]
+              print(f'| `{p}` | {rc} | {oc} | {title(rb)[:40]} | {title(ob)[:40]} | {len(diff)} |')
+              details.append((p, rc, oc, rt, ot, diff, images(rb, ref), images(ob, ours)))
+
+          for p, rc, oc, rt, ot, diff, ri, oi in details:
+              print()
+              print(f'## `{p}`')
+              print()
+              print(f'- 시안 HTTP {rc} · 문장 {len(rt)}줄 / 우리 HTTP {oc} · 문장 {len(ot)}줄')
+              if ri or oi:
+                  print(f'- 시안 이미지: {", ".join("`%s`" % s for s in ri[:12]) or "(없음)"}')
+                  print(f'- 우리 이미지: {", ".join("`%s`" % s for s in oi[:12]) or "(없음)"}')
+              only_ref = [l[1:] for l in diff if l.startswith('-')]
+              only_ours = [l[1:] for l in diff if l.startswith('+')]
+              print()
+              print('<details><summary>시안에만 있는 문장 (최대 60)</summary>')
+              print()
+              for l in only_ref[:60]:
+                  print(f'- {l}')
+              print()
+              print('</details>')
+              print()
+              print('<details><summary>우리에만 있는 문장 (최대 60)</summary>')
+              print()
+              for l in only_ours[:60]:
+                  print(f'- {l}')
+              print()
+              print('</details>')
+          PY
+          echo "대조 결과는 이 실행의 Summary 에 있습니다"

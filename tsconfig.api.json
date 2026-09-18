@@ -1,0 +1,20 @@
+{
+  "//": "서버 코드 타입 검사 (28-68). tsconfig.json의 include가 [\"src\", ...]라 서버 코드는 `tsc --noEmit` 밖에 있었다 — 게이트가 안 보는 코드를 두지 않는다(28-64-01이 지적한 형태의 재발 방지). 28-70: server/(공용 서버 코드)도 본다. 29-5: 옛 루트 api/가 server/handlers/로 들어와 이 하나로 전부 덮인다. src/domain/auth.ts는 import를 따라 함께 검사된다.",
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022"],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true,
+    "exactOptionalPropertyTypes": true,
+    "noUncheckedIndexedAccess": true,
+    "skipLibCheck": true,
+    "isolatedModules": true,
+    "noEmit": true,
+    "types": ["node"]
+  },
+  "include": ["server"]
+}

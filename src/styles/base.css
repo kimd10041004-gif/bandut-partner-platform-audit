@@ -1,0 +1,43 @@
+/* 베이스: 리셋 · 바디 · 레이아웃 (28-10-03) */
+
+* {
+  box-sizing: border-box;
+}
+html,
+body {
+  overflow-x: hidden;
+}
+
+body {
+  margin: 0;
+  font-family: 'Pretendard', 'Apple SD Gothic Neo', 'Noto Sans KR', system-ui, sans-serif;
+  color: var(--ink);
+  background: var(--bg);
+  font-size: var(--fs-body);
+  line-height: 1.6;
+  font-feature-settings: 'tnum' 1; /* 숫자 전역 tabular */
+  -webkit-font-smoothing: antialiased;
+}
+
+.app {
+  max-width: 1024px;
+  margin: 0 auto;
+  padding: 0 18px 56px;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .card,
+  .stat {
+    animation: rise 0.28s ease both;
+  }
+  @keyframes rise {
+    from {
+      opacity: 0;
+      transform: translateY(4px);
+    }
+    to {
+      opacity: 1;
+      transform: none;
+    }
+  }
+}

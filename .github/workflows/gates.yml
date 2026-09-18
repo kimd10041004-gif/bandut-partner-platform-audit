@@ -1,0 +1,344 @@
+# 28-64-01: 게이트를 실제로 돌린다.
+#
+# 이 저장소의 게이트(check·e2e·visual-check·audit)는 64라운드 동안 "누가 기억해서 돌리는" 상태였다.
+# CI가 하나도 없어서, 타입 오류나 테스트 실패가 있는 커밋도 main에 들어가 그대로 배포됐다.
+# 실제로 그렇게 배포된 버그가 있었다 — koreanDate가 달력에 없는 날짜를 다른 날짜로 바꿔 보여줬다.
+#
+# 28-66: 코드가 저장소 루트 하나로 합쳐졌다. 라운드는 package.json version의 minor에서 읽는다
+# (28.66.0 → 28-66). deploy-check.yml과 같은 출처를 쓴다 — 라운드마다 이 파일을 고칠 필요가 없다.
+#
+# 네 게이트 모두 차단(blocking)이다. continue-on-error는 쓰지 않는다:
+# 무시해도 되는 빨간불을 만들지 않는 것이 이 워크플로의 요점이다.
+name: gates
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: gates-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gates:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 라운드 확인
+        id: round
+        run: |
+          set -euo pipefail
+          r="$(node -p "require('./package.json').version.split('.').slice(0, 2).join('-')")"
+          test -d "docs/rounds/$r" || { echo "::error::라운드 문서 폴더가 없습니다: docs/rounds/$r"; exit 1; }
+          grep -qF "$r" src/App.tsx || { echo "::error::src/App.tsx의 라운드 표기가 $r 과 다릅니다"; exit 1; }
+          echo "round=$r" >> "$GITHUB_OUTPUT"
+          echo "이번 검사 대상: $r"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      # npm의 기본 fetch-timeout은 300000ms(5분)다 — 응답이 끊긴 소켓 하나가 5분을 통째로 잡아먹는다.
+      # 이 저장소의 첫 CI 실행 3회 중 2회가 정확히 그 모양으로 멈췄다(동일 락파일로 로컬 npm ci는 13초).
+      # 그래서 타임아웃을 60초로 낮추고 재시도를 늘려, 멈춘 연결이 job 예산을 먹지 않고 곧바로 회복되게 한다.
+      # --prefer-offline은 setup-node가 복원한 ~/.npm 캐시를 재검증 없이 쓰고,
+      # --no-audit --no-fund는 설치와 무관한 추가 네트워크 호출을 없앤다(audit은 뒤에 별도 단계로 돈다).
+      - name: 의존성 설치
+        timeout-minutes: 8
+        run: |
+          set -euo pipefail
+          install() {
+            npm ci --prefer-offline --no-audit --no-fund \
+              --fetch-timeout=60000 \
+              --fetch-retries=4 \
+              --fetch-retry-mintimeout=2000 \
+              --fetch-retry-maxtimeout=15000
+          }
+          install || { echo "1차 설치 실패 — 캐시를 지우고 한 번 더 시도합니다"; npm cache clean --force; install; }
+
+      # tsc --noEmit + vitest + vite build. build가 마지막이라 이후 브라우저 게이트는
+      # 항상 방금 만든 dist를 본다(스크립트의 dist 신선도 가드와 짝을 이룬다).
+      - name: check (타입·단위 테스트·빌드)
+        timeout-minutes: 8
+        run: npm run check
+
+      - name: npm audit
+        timeout-minutes: 3
+        run: npm audit --audit-level=high
+
+      # e2e·visual-check는 playwright-core를 import 하는데, 이 저장소의 devDependencies에는 없다
+      # (28-64 감사가 지적한 그대로 — 첫 CI 실행이 `playwright-core를 찾을 수 없습니다`로 실패해 확인됐다).
+      # 저장소의 lockfile을 건드리지 않으려고 --no-save로 넣는다(게이트 전용 의존성이다). 버전은 이 프로젝트의
+      # 게이트가 실제로 검증된 1.49.1로 고정한다 — 브라우저와 모듈 버전이 어긋나지 않게.
+      - name: Playwright 브라우저 캐시
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-1.49.1-chromium-${{ runner.os }}
+
+      # --with-deps는 쓰지 않는다: ubuntu-latest에는 chromium 시스템 의존성이 이미 있고,
+      # 그 apt 단계가 러너에서 18분 넘게 멈춰 job 예산을 통째로 먹은 것을 실제로 확인했다.
+      # 단계별 타임아웃을 둬서 멈추면 빨리 실패하게 한다(20분 job 예산을 한 단계가 삼키지 못하게).
+      - name: Playwright 설치 (모듈 + chromium)
+        timeout-minutes: 6
+        run: |
+          set -euo pipefail
+          npm i --no-save --no-audit --no-fund --fetch-timeout=60000 --fetch-retries=4 playwright@1.49.1
+          npx playwright install chromium
+
+      - name: e2e (실사용 여정)
+        timeout-minutes: 10
+        run: npm run e2e
+
+      - name: visual-check
+        timeout-minutes: 6
+        run: npm run visual-check
+
+      - name: 요약
+        if: always()
+        run: |
+          {
+            echo "### 게이트"
+            echo "- 대상 라운드: \`${{ steps.round.outputs.round }}\`"
+            echo "- 결과: ${{ job.status }}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # 28-68: 서버 저장 계층을 **진짜 Postgres에 대고** 검증한다. 28-70: 계정·세션과 서버 모드 e2e까지.
+  #
+  # DB 프로비저닝(Neon)을 기다릴 필요가 없다 — GitHub Actions가 postgres 컨테이너를 띄워 주므로
+  # 스키마·API·HTTP 어댑터가 실제로 동작하는지 여기서 증명된다.
+  # 프로덕션 연결은 그 뒤 환경변수(DATABASE_URL·ADMIN_PASSWORD·VITE_AUTH_MODE)로 붙는다(docs/rounds/28-68/서버_연결.md).
+  #
+  # 이 job이 검증하는 것은 gates job이 볼 수 없는 것들이다:
+  #  - db/schema.sql이 실제 Postgres에서 적용되는가
+  #  - 낙관적 동시성(where rev = $expected)이 진짜 동시 쓰기에서 하나만 통과시키는가
+  #  - HttpSnapshotPort가 로컬 어댑터와 **같은 계약 테스트**를 통과하는가 — 세션 토큰으로 로그인해서
+  #  - 복제기 × HTTP × Postgres 합성 (28-69-04a)
+  #  - 서버 모드로 빌드한 앱을 기기 셋(브라우저 컨텍스트)이 실제로 쓰는가 — scripts/e2e-server.mjs (28-70)
+  server:
+    runs-on: ubuntu-latest
+    # 29-30: 봇이 사진·스트림 길까지 걸어 9분대에서 11분대로 늘었다. 15 는 첫 실행에서 취소를 냈다.
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: bandut_test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/bandut_test
+      # 28-70: 관리자 초기 비밀번호 — 시연값(bandut1234!)이면 /api/auth가 503이다. CI 전용 값
+      ADMIN_PASSWORD: ci-admin-pass-1
+      # 28-68-04b: 이 job에서는 HTTP 어댑터가 계약 대상에 **반드시** 들어와야 한다.
+      # 28-68은 모든 장치가 CONTRACT_API_URL 하나에 매달려 있어, 아래 step env 두 줄을 지워도 초록이었다.
+      # 이 값이 있으면 URL 부재가 계약 테스트 파일 전체의 실패다.
+      CONTRACT_REQUIRE_HTTP: '1'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      # gates job과 같은 방식 — npm 기본 fetch-timeout(5분)이 job 예산을 먹지 않게 한다
+      - name: 의존성 설치
+        timeout-minutes: 8
+        run: |
+          set -euo pipefail
+          install() {
+            npm ci --prefer-offline --no-audit --no-fund \
+              --fetch-timeout=60000 \
+              --fetch-retries=4 \
+              --fetch-retry-mintimeout=2000 \
+              --fetch-retry-maxtimeout=15000
+          }
+          install || { echo "1차 설치 실패 — 캐시를 지우고 한 번 더 시도합니다"; npm cache clean --force; install; }
+
+      - name: 서버 코드 타입 검사 (server/)
+        run: npx tsc --noEmit -p tsconfig.api.json
+
+      # 29-5: **이 순서가 검사 자체다.** 아직 psql을 돌리지 않은, 표가 하나도 없는 DB에서 먼저 돌린다.
+      # 서버가 스스로 스키마를 세우지 못하면 여기서 실패한다 — gates job에는 DATABASE_URL이 없어
+      # 이 테스트의 DB 부분이 건너뛰어지므로, 실제로 도는 자리는 여기 하나뿐이다.
+      - name: 빈 DB에서 서버가 스키마를 스스로 세운다
+        run: npx vitest run server/schemaBootstrap.test.ts
+
+      # 위 단계에서 서버가 이미 표를 세웠다. 그 위에 한 번 더 얹어 **다시 적용해도 안전한지**까지 본다.
+      - name: 스키마 적용 (이미 선 표 위에 다시 얹어도 되는지 함께 확인)
+        run: psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f db/schema.sql
+
+      # 프리뷰 서버와 같은 패턴 — 127.0.0.1 명시, 출력 캡처, 데드라인.
+      # 조용히 죽으면 계약 테스트가 "닿을 수 없다"로 통과해 버릴 수 있으므로 여기서 확실히 세운다.
+      - name: API 서버 기동
+        run: |
+          set -euo pipefail
+          node scripts/api-server.mjs 3101 > /tmp/api-server.log 2>&1 &
+          echo $! > /tmp/api-server.pid
+          for i in $(seq 1 30); do
+            if curl -sf http://127.0.0.1:3101/healthz > /dev/null; then
+              echo "API 서버 기동 확인 (${i}초)"
+              exit 0
+            fi
+            if ! kill -0 "$(cat /tmp/api-server.pid)" 2>/dev/null; then
+              echo "::error::API 서버가 먼저 종료됨"; cat /tmp/api-server.log; exit 1
+            fi
+            sleep 1
+          done
+          echo "::error::API 서버 기동 실패(30초)"; cat /tmp/api-server.log; exit 1
+
+      # CONTRACT_API_URL이 있으면 계약 테스트에 HttpSnapshotPort가 **반드시** 들어온다.
+      # 들어오지 않으면 "계약 대상" 테스트가 실패한다 — 조용한 축소를 막는 장치다.
+      - name: 계약 테스트 (Local · Memory · Http 세 구현 — Http는 /api/auth에 로그인해 토큰을 받는다)
+        timeout-minutes: 5
+        env:
+          CONTRACT_API_URL: http://127.0.0.1:3101/api/snapshot
+        run: npm run test:contract
+
+      # 29-1: v17 도메인을 **우리가 실제로 쓸 저장소**에서 한 번 더 돌린다.
+      # 스키마 변환(scripts/pg-schema.mjs)·자리표시자·batch 트랜잭션·plpgsql로 옮긴 트리거가 여기서 걸린다.
+      - name: 결제·거래 도메인 Postgres 포트 검사
+        timeout-minutes: 5
+        run: npm run test:pg
+
+      # 29-26: SQLite 로만 돌던 통합 스위트 셋(접수·거래·작업공간)을 **같은 코드로 Postgres 에서** 돌린다.
+      # 29-25 의 넷과 29-26 의 셋이 모두 "SQLite 초록, Postgres 죽음"이었다 — 방언 차이는 여기서 걸린다.
+      - name: 통합 스위트를 Postgres 로 (접수·거래·작업공간)
+        timeout-minutes: 8
+        run: npm run test:pg:suite
+
+      # 29-2: v17 도메인이 **우리 세션으로** 도는지. DATABASE_URL이 있는 이 job에서만 의미가 있다
+      # (gates job에는 DB가 없어 skipIf로 건너뛴다 — 즉 여기 없으면 어디서도 안 돈다).
+      - name: 마켓플레이스 API·세션 검사
+        timeout-minutes: 5
+        run: npm run test:mp
+
+      # 29-12: 복구가 기존 세션을 실제로 폐기하는지. 도메인은 세션을 모르므로 여기서만 확인된다.
+      # gates job 에는 DB 가 없어 skipIf 로 건너뛴다 — 이 단계가 없으면 어디서도 안 돈다.
+      - name: 비밀번호 복구 검사
+        timeout-minutes: 5
+        run: npm run test:reset
+
+      # 29-16-2: 가입부터 승인까지 한 줄. 이 여정은 지금까지 두 파일로 쪼개져 있어 이음매가
+      # 비어 있었다 — 진짜 가입 토큰이 v17 users 행이 되고 승인이 권한을 여는지를 여기서 잰다.
+      - name: 가입→승인 여정 검사
+        run: npm run test:journey
+
+      # 29-17: 주소가 다르다는 것과 데이터가 다르다는 것은 다른 말이다. 표식이 실제로 남고
+      # 읽히는지, 그리고 운영에서는 남지 않는지를 여기서 잰다.
+      - name: 데이터 분리 표식 검사
+        run: npm run test:probe
+
+      # 29-3: Next.js 앱 셸이 실제로 뜨고 그 위에서 우리 세션 게이트가 사는지.
+      # gates job에는 DB가 없어 401이 아니라 503이 나온다 — 그래서 Postgres가 있는 이 job이 자리다.
+      - name: Next 앱 셸 연기 검사
+        timeout-minutes: 8
+        run: |
+          npm run build:next
+          npm run e2e:next
+
+      - name: 저장된 행 확인
+        run: |
+          psql "$DATABASE_URL" -c "select count(*) as 스냅샷_행수, count(distinct updated_by) as 쓴_계정수 from snapshots;"
+          psql "$DATABASE_URL" -c "select count(*) as 세션수, count(*) filter (where revoked_at is not null) as 폐기됨, bool_and(token_hash ~ '^[0-9a-f]{64}$') as 해시만 from sessions;"
+
+      # 28-70: 서버 모드 e2e — VITE_AUTH_MODE=server로 빌드한 dist를 api-server가 같은 origin에서 서빙한다.
+      # 계약 테스트용 API 서버(3101)는 그대로 두고, e2e가 자기 서버(4351, --static dist)를 띄운다.
+      - name: Playwright 브라우저 캐시
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-1.49.1-chromium-${{ runner.os }}
+
+      - name: Playwright 설치 (모듈 + chromium)
+        timeout-minutes: 6
+        run: |
+          set -euo pipefail
+          npm i --no-save --no-audit --no-fund --fetch-timeout=60000 --fetch-retries=4 playwright@1.49.1
+          npx playwright install chromium
+
+      # 29-8: 공간 스튜디오는 **실제로 열어 본다.** 정적 크롤로 받아 온 앱이라 파일이 빠져도
+      # /interior/ 는 200 이고 HTML 도 멀쩡하다 — 텍스처 두 장이 실제로 그렇게 빠졌고, 브라우저로
+      # 열어 네트워크를 보고서야 드러났다. 4xx 가 하나도 없는지, CSP 가 막지 않는지 본다.
+      #
+      # 위 Playwright 설치 **뒤에** 둔다. 처음엔 `e2e:next` 옆에 뒀다가 브라우저가 아직 없어
+      # 1초 만에 실패했다. `.next` 는 `e2e:next` 단계가 이미 빌드해 뒀다.
+      - name: 공간 스튜디오 연기 검사 (브라우저)
+        timeout-minutes: 6
+        run: npm run e2e:interior
+
+      # 29-16-1: 200 도 아니고 HTML 도 맞는데 눈으로 보면 틀린 것. 문단 안 아이콘이 자기 줄을
+      # 차지해 글자를 밀어냈다(Tailwind preflight 의 svg{display:block}). 문자열 검사로는
+      # 잡히지 않아 여기서 실제로 재 본다. 데스크톱과 390px 두 폭에서 본다.
+      - name: 글줄 배치 검사 (브라우저)
+        timeout-minutes: 6
+        run: npm run e2e:layout
+
+      # 29-18: 가입 → 승인 → 권한을 **브라우저가 사람 대신** 한 바퀴 돈다. HTTP 검사
+      # (test:journey)와 화면 연기 검사(e2e:next)가 각각 반쪽만 보던 자리다. 거절돼야 하는 길
+      # (동의·인증번호·중복 번호)도 함께 잰다.
+      - name: 가입→승인 브라우저 왕복
+        timeout-minutes: 8
+        run: npm run e2e:signup
+
+      # 29-22: 관리자·파트너·고객 창을 **동시에** 띄워 감사한다. 혼자 도는 검사가 구조적으로
+      # 못 보는 둘을 본다 — 관리자 화면 열다섯 장의 실제 내용, 그리고 그 열다섯 장을 남이
+      # 열었을 때의 거절. 첫 실행이 빈 저장소 동시 가입 경쟁을 잡았다(29-22-1).
+      - name: 세 역할 동시 감사 + 실제 채팅
+        timeout-minutes: 10
+        # 29-23: 서류는 파일 저장소가 있어야 다룬다. 러너에서는 파일 시스템 백엔드를 쓴다 —
+        # Vercel 저장소에 붙을 수 없으므로, 붙을 수 있는 것으로 규칙을 실제로 잰다.
+        env:
+          LOCAL_STORAGE_DIR: ${{ runner.temp }}/bandut-docs
+        run: npm run e2e:roles
+
+      # 29-25: 접수부터 정산까지 한 바퀴. 위 봇들이 못 보던 구간이고, 첫 실행이 **운영에서만
+      # 죽어 있던 셋**을 잡았다 — 대시보드 지표, 주문 상담, 사진 업로드. 셋 다 단위 테스트는
+      # 초록이었다. 화면으로 걸어 봐야만 보이는 자리라 여기에 남긴다.
+      - name: 거래 한 바퀴 감사 (접수 → 낙찰 → 계약 → 작업 → 정산)
+        timeout-minutes: 12
+        # 29-30: 사진이 실제로 올라가고 내려오는 길(접수 사진 → 낙찰 전 403 → 낙찰 뒤 200 → 증빙)을 걷는다.
+        # 저장소가 없으면 봇은 503 을 확인하는 옛 길로 간다 — 그 길은 이제 이 저장소를 잠깐 빼고 돌릴 때만이다.
+        env:
+          LOCAL_STORAGE_DIR: ${{ runner.temp }}/bandut-photos
+        run: npm run e2e:trade
+
+      # 29-25: 성공하는 길 말고 **실제 사용자가 하는 짓**. 휴대폰 폭, 틀린 비밀번호, 중복 가입,
+      # 로그인 없이 남의 주소, 새로고침과 뒤로 가기, 그리고 취소. 운영 대시보드가 숫자를 실제로
+      # 그리는지도 여기서 잰다 — 29-25-01 이 죽여 놨던 자리라 화면으로 지켜야 한다.
+      - name: 실사용 여러 갈래 (휴대폰·거절·대시보드·취소)
+        timeout-minutes: 10
+        run: npm run e2e:live
+
+      - name: 서버 모드 빌드
+        run: VITE_AUTH_MODE=server npx vite build
+
+      - name: 서버 모드 e2e (기기 셋 · 계정·세션·스냅샷 왕복)
+        timeout-minutes: 8
+        run: npm run e2e:server
+
+      - name: API 서버 로그
+        if: always()
+        run: cat /tmp/api-server.log || true
+
+      - name: 요약
+        if: always()
+        run: |
+          {
+            echo "### 서버 계층 (28-68 → 28-70)"
+            echo "- Postgres 16 컨테이너 + db/schema.sql + server/handlers/snapshot.ts + server/handlers/auth.ts + HttpSnapshotPort + 서버 모드 e2e"
+            echo "- 결과: ${{ job.status }}"
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -1,0 +1,400 @@
+# 28-63-01: 배포 확인 — 게이트가 로컬 빌드까지만 보던 구간을 잇는다.
+#
+# 이 저장소의 게이트(check·e2e·visual-check)는 모두 개발 컨테이너 안에서 끝난다.
+# 실제 라이브 주소가 그 빌드를 서빙하는지는 63라운드 동안 기계가 확인한 적이 없었다.
+# GitHub Actions는 개발 환경의 네트워크 제약 밖에서 돌기 때문에 라이브 주소를 직접 받을 수 있다.
+#
+# 라운드 번호는 package.json의 version minor에서 읽는다(28.67.0 → 28-67) —
+# 라운드마다 이 파일을 고칠 필요가 없다. 28-66에서 코드가 루트로 합쳐지면서 vercel.json에는
+# 더 이상 라운드 문자열이 없다(outputDirectory: dist).
+name: deploy-check
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      expect_round:
+        description: '기대 라운드 (비우면 package.json version에서 읽는다). 실패 검증용으로 일부러 틀린 값을 넣어볼 수 있다.'
+        required: false
+        type: string
+      base_url:
+        description: '검사할 주소 (비우면 프로덕션). 29-5: 프리뷰 배포를 라이브 전에 같은 기준으로 재기 위해 연다.'
+        required: false
+        type: string
+      browser:
+        description: '배포된 화면을 브라우저로도 열어 본다 (29-19). base_url 을 준 경우에만 돈다.'
+        required: false
+        default: false
+        type: boolean
+      signup:
+        description: '가입→승인 왕복을 배포된 프리뷰에서 돌린다 (29-20). 계정이 실제로 만들어진다. 운영 주소는 스크립트가 거부한다.'
+        required: false
+        default: false
+        type: boolean
+  schedule:
+    - cron: '17 0 * * *' # 하루 1회 — 배포가 조용히 뒤집히는 일을 잡는다
+
+concurrency:
+  group: deploy-check
+  cancel-in-progress: false
+
+jobs:
+  live:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 기대 라운드 확인
+        id: expect
+        run: |
+          set -euo pipefail
+          from_json="$(node -p "require('./package.json').version.split('.').slice(0, 2).join('-')")"
+          round="${{ inputs.expect_round }}"
+          if [ -z "$round" ]; then round="$from_json"; fi
+          echo "round=$round" >> "$GITHUB_OUTPUT"
+          echo "package.json 기준: $from_json / 이번 검사 기대값: $round"
+
+      - name: 배포 반영 대기
+        if: github.event_name == 'push'
+        run: sleep 60
+
+      - name: 라이브 주소 검사
+        id: live
+        env:
+          BASE: ${{ inputs.base_url || 'https://bandut-partner-platform.vercel.app' }}
+          ROUND: ${{ steps.expect.outputs.round }}
+        run: |
+          set -euo pipefail
+          # 프로덕션 배포는 병합 후 5~8분 걸린다(28-64 실측: 08:30 병합 → 08:38 반영).
+          # 200 확인과 라운드 확인을 한 루프 안에서 함께 재시도한다 —
+          # 둘을 나눠 라운드는 한 번만 보면, 배포가 늦은 것과 잘못 서빙 중인 것을 구분하지 못한다.
+          attempts=12
+          last=""
+          for attempt in $(seq 1 $attempts); do
+            code="$(curl -sS -o page.html -w '%{http_code}' --max-time 30 "$BASE/" || echo 000)"
+            if [ "$code" != "200" ]; then
+              last="HTTP $code"
+              echo "시도 $attempt/$attempts — $last"
+            else
+              # 29-4: 라이브가 옛 SPA일 수도, 새 Next 셸일 수도 있는 과도기다.
+              #  - SPA: 라운드·모드 표식이 /assets/index-*.js 번들 안에 있다 (28-64·28-87)
+              #  - Next 셸: 서버가 내려 준 HTML 안에 있다 (29-4, app/layout.tsx)
+              # 둘 다 받아들이게 해 두면, 29-5에서 배포만 바꿔도 이 게이트가 깨지지 않는다.
+              asset="$(grep -oE '/assets/index-[A-Za-z0-9_-]+\.js' page.html | head -1 || true)"
+              if [ -n "$asset" ]; then
+                curl -sS --max-time 30 "$BASE$asset" -o probe.txt
+                served="옛 SPA 번들 $asset"
+              else
+                cp page.html probe.txt
+                served="Next 셸이 내려 준 HTML"
+              fi
+              if true; then
+                if grep -qF "$ROUND" probe.txt; then
+                  echo "시도 $attempt/$attempts — $served 에 라운드 $ROUND 확인, 배포 반영됨"
+                  # 28-87-05: **어느 모드로 서빙 중인가**를 같이 읽는다.
+                  # 28-68 이후 스무 라운드의 서버 작업이 로컬 모드 배포라 아무에게도 닿지 않았는데,
+                  # 그 사실을 말해 주는 기계가 하나도 없었다. 이제 매 배포가 말한다.
+                  mode="$(grep -oE 'bandut-auth-mode:(local|server)' probe.txt | head -1 | cut -d: -f2 || true)"
+                  if [ -z "$mode" ]; then
+                    echo "::error::서빙 응답에 인증 모드 표식이 없습니다 — 계측이 조용히 끊겼습니다 (SPA: src/app/bootstrap.ts AUTH_MODE_MARK · Next 셸: app/layout.tsx)"
+                    exit 1
+                  fi
+                  echo "mode=$mode" >> "$GITHUB_OUTPUT"
+                  echo "서빙 인증 모드: $mode"
+                  if [ "$mode" = "local" ]; then
+                    echo "::warning::프로덕션이 **로컬 모드**로 서빙 중입니다 — 서버 계정·세션 API는 실행되지 않습니다 (docs/rounds/28-87/서버_모드_전환.md)"
+                  fi
+                  exit 0
+                fi
+                last="$served 에 라운드 $ROUND 가 없습니다"
+                echo "시도 $attempt/$attempts — $last"
+              fi
+            fi
+            [ "$attempt" = "$attempts" ] || sleep 30
+          done
+          echo "::error::배포 확인 실패 — $last"
+          exit 1
+
+      # 29-5: 라이브가 **서버로 갈 준비가 됐는지**를 기계가 말한다.
+      #
+      # 배포를 Next로 옮기면 라이브가 서버 렌더링이 된다. 그때 DATABASE_URL·ADMIN_PASSWORD 가
+      # 없으면 로그인·가입이 통째로 죽는다(docs/rounds/28-68/서버_연결.md). 그런데 그 값들은 Vercel
+      # 프로젝트 안에 있어서 저장소 어디에서도 보이지 않는다 — 29-4까지 이 질문에 답할 기계가 없었다.
+      #
+      # ## GET 으로 묻던 판이 왜 거짓 초록이 됐는가 (29-5, 실제로 당했다)
+      #
+      # 옛 판은 `/api/auth` 에 **GET** 을 보내 405 면 "둘 다 설정됨"으로 읽었다. 옛 구조에서는 맞았다 —
+      # GET 이 우리 핸들러까지 갔고, 405 는 핸들러가 환경변수 검사를 **지나간 뒤** 내는 답이었다.
+      #
+      # App Router 로 옮기면서 그 전제가 깨졌다. `app/api/auth/route.ts` 는 POST 만 내보낸다. 그래서
+      # GET 은 **우리 핸들러를 부르기도 전에** Next 가 405 로 돌려보낸다. 같은 405 인데 뜻이 정반대다.
+      # 실제로 ADMIN_PASSWORD 가 없는 프리뷰를 "둘 다 설정됨"으로 보고했다.
+      #
+      # 그래서 이제 **POST 하나로만** 묻는다. 우리 핸들러에 반드시 들어가는 유일한 메서드다.
+      # 핸들러는 두 값을 이 순서로, DB 보다 먼저, 인자 검증보다도 먼저 본다(server/handlers/auth.ts).
+      # 29-21 에서 가입 코드가 빠져 셋이 둘이 됐다:
+      #
+      #   1. DATABASE_URL 없음      → 503 "서버 저장소가 아직 연결되지 않았습니다"
+      #   2. ADMIN_PASSWORD 없음    → 503 "ADMIN_PASSWORD가 없거나 시연값입니다 …"
+      #   3. 인증번호 전달 불가     → 503 "문자 발송이 아직 연결되지 않아 …"  ← 위 둘은 다 있다
+      #   4. 그 뒤 저장소 접근 실패 → 503 "서버 저장소 오류 …"   ← 둘은 있는데 DB 가 안 되는 경우
+      #   5. 전부 지나 인자 검증에서 끝 → 400 "가입 정보가 없습니다"  ← 둘 다 있고 DB 도 된다
+      #
+      # 29-19: 3번을 1번으로 잘못 읽고 있었다. 분류가 `'아직 연결되지'` 를 찾았는데 그 조각이
+      # 1번("서버 저장소가 아직 연결되지 않았습니다")과 4번("문자 발송이 아직 연결되지 않아…")
+      # **양쪽에 다 있다.** 그래서 프리뷰가 4번으로 답하는데 보고서에는 "DATABASE_URL 없음"이 찍혔다.
+      # 설정은 멀쩡한데 없다고 말한 것이라, 사람을 엉뚱한 곳으로 보내는 종류의 오류다(29-17-2와 같다).
+      # 이제 각 문구의 **고유한 부분**으로 가른다.
+      #
+      # 빈 args 라 5번에서 끝난다 — **계정도 OTP 도 만들어지지 않는다**. 값은 묻지도 찍지도 않고
+      # 이름과 설정 여부만 남긴다. 위 문구들은 모두 고정 문자열이라 비밀값이 섞이지 않는다.
+      #
+      # 아직 SPA를 서빙하는 동안 환경변수가 없는 것은 정상이므로 **실패시키지 않는다** — 알리기만 한다.
+      # 29-5: 경로가 살아 있는지 — 홈 하나만 보던 자리를 넓힌다.
+      #
+      # 배포를 옮기면 **주소 체계가 통째로 갈린다.** 옛 SPA 는 어떤 경로든 index.html 을 주고 브라우저가
+      # 해시로 갈랐다. 새 셸은 서버가 경로마다 다른 화면을 고른다(`app/[...slug]/page.tsx`). 그래서
+      # 홈만 보고 "됐다"고 하면 나머지가 404 여도 모른다 — 손님은 그 나머지에서 만난다.
+      #
+      # **읽기만 한다.** GET 뿐이라 계정도 데이터도 만들어지지 않는다. 로그인이 필요한 화면은 셸이
+      # 게이트를 그려 주므로 200 이다 — 여기서 보는 것은 "그 주소가 존재하는가"이지 "내용이 맞는가"가
+      # 아니다. 내용은 사람이 본다.
+      - name: 기존 경로가 살아 있는지 (읽기만)
+        id: paths
+        if: always()
+        env:
+          BASE: ${{ inputs.base_url || 'https://bandut-partner-platform.vercel.app' }}
+        run: |
+          set -uo pipefail
+          bad=0
+          {
+            echo "| 경로 | HTTP |"
+            echo "| --- | --- |"
+          } > paths.md
+          for path in / /interior /login /login/partner /login/admin /signup /signup/partner \
+                      /request /services /notices /privacy /terms /marketplace-notice \
+                      /start /start/customer /start/partner \
+                      /mypage /profile /messages /search /schedule \
+                      /partner /partner/jobs /partner/work /partner/bids /partner/settlement /partner/portfolio \
+                      /admin /admin/orders /admin/partners /admin/settings /admin/content /admin/reviews \
+                      /admin/settlements /admin/disputes /admin/audit-logs /admin/editor; do
+            code="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 30 "$BASE$path" || echo 000)"
+            echo "| \`$path\` | $code |" >> paths.md
+            case "$code" in
+              2*|3*) ;;
+              *) bad=$((bad + 1)); echo "::error::$path 가 HTTP $code 입니다" ;;
+            esac
+          done
+          cat paths.md
+          echo "bad=$bad" >> "$GITHUB_OUTPUT"
+          if [ "$bad" -gt 0 ]; then
+            echo "경로 $bad 개가 살아 있지 않습니다"
+            exit 1
+          fi
+          echo "경로 전부 살아 있습니다"
+
+      # 29-6: 200 은 "그 주소가 있다"까지만 말한다.
+      #
+      # 바로 앞 단계가 경로 36개를 전부 200 으로 확인했는데도, 사람이 프리뷰를 열자
+      # "ChatGPT로 로그인하고 계속하기"가 404 로 떨어졌다. 로그인 화면은 200 이었다 —
+      # 그 안의 버튼이 남의 주소를 가리키고 있었을 뿐이다. 이미지도 같은 모양이었다:
+      # 화면은 200 인데 그 안의 /brand/logo.png 가 404.
+      #
+      # 그래서 화면 **안**을 본다. 여전히 GET 뿐이라 계정도 데이터도 만들어지지 않는다.
+      # 새 셸(인증 모드 server)에서만 잰다 — 옛 SPA 는 어떤 경로든 index.html 을 주므로
+      # 이 단언들이 성립하지 않고, 성립하지 않는 것을 실패로 세면 안 된다.
+      - name: 화면 안까지 본다 (읽기만)
+        id: content
+        if: always()
+        env:
+          BASE: ${{ inputs.base_url || 'https://bandut-partner-platform.vercel.app' }}
+          MODE: ${{ steps.live.outputs.mode }}
+        run: |
+          set -uo pipefail
+          if [ "${MODE:-}" != "server" ]; then
+            echo "bad=skipped" >> "$GITHUB_OUTPUT"
+            echo "인증 모드가 server 가 아닙니다 (${MODE:-확인 못 함}) — 화면 내용 검사는 새 셸에서만 합니다"
+            exit 0
+          fi
+
+          bad=0
+          fail() { bad=$((bad + 1)); echo "::error::$1"; }
+
+          # -L: 앞 단계가 3xx 도 "살아 있음"으로 세므로, 리디렉션이 걸린 주소에서 빈 본문을
+          # 받아 놓고 "내용이 없다"고 잘못 실패하지 않게 따라간다.
+          curl -sSL --max-time 30 "$BASE/login" -o login.html   || : > login.html
+          curl -sSL --max-time 30 "$BASE/signup" -o signup.html || : > signup.html
+          curl -sSL --max-time 30 "$BASE/" -o home.html         || : > home.html
+
+          # 우리 로그인 폼이 실제로 그려졌는가
+          grep -q 'data-login-submit' login.html || fail '/login 에 우리 로그인 폼이 없습니다 (data-login-submit)'
+          # 29-10: 공개 로그인은 고객·파트너만 고른다. 관리자는 /login/admin 한 자리뿐이고
+          # 그 주소는 화면 어디에서도 링크하지 않는다 — 공개 화면에 운영자 문을 내걸지 않는다.
+          for role in customer partner; do
+            grep -q "data-login-role=\"$role\"" login.html || fail "/login 에서 $role 역할을 고를 수 없습니다"
+          done
+          grep -q 'data-login-role="admin"' login.html &&
+            fail '/login 이 관리자 역할을 내걸고 있습니다 — 공개 화면에서 고를 수 없어야 합니다'
+          grep -q 'data-signup-code' signup.html && fail '/signup 에 가입 코드 입력이 남아 있습니다 (29-21에서 없앴다)'
+          grep -q 'data-otp-input\|data-signup-submit' signup.html || fail '/signup 이 가입 단계를 그리지 않습니다'
+
+          # 남의 인증으로 나가는 문이 남아 있는가
+          for f in login.html signup.html home.html; do
+            grep -q 'signin-with-chatgpt\|signout-with-chatgpt' "$f" && fail "$f 에 ChatGPT 인증 주소가 남아 있습니다"
+          done
+
+          # 29-10: 탭 아이콘. 사장님이 프리뷰 탭에서 지구 모양을 봤다고 알려 줬는데, 우리 검사는
+          # 어느 것도 이걸 안 보고 있었다 — 단위 가드는 파일이 저장소에 있는지만, 위 에셋 검사는
+          # src="…" 만 센다. 아이콘은 <link rel="icon"> 이다. 실제로 받아 본다.
+          for f in home.html login.html; do
+            for icon in $(grep -ohE '<link[^>]*rel="icon"[^>]*>' "$f" \
+                          | grep -ohE 'href="[^"]+"' | sed -E 's/^href="//; s/"$//'); do
+              case "$icon" in /*) ;; *) continue ;; esac
+              code="$(curl -sS -o icon.bin -w '%{http_code}' --max-time 30 "$BASE$icon" || echo 000)"
+              kind="$(file -b --mime-type icon.bin 2>/dev/null || echo unknown)"
+              case "$code/$kind" in
+                2*/image/*) echo "탭 아이콘 $icon → $code $kind" ;;
+                *) fail "탭 아이콘 $icon 이 HTTP $code ($kind) 입니다 — 브라우저가 기본 아이콘을 씁니다" ;;
+              esac
+            done
+          done
+
+          # 화면이 부르는 이미지·에셋이 실제로 200 인가 (홈·로그인·가입에서 뽑은 것)
+          # 이미지가 먼저다. /_next/static/chunks/... 는 이름이 알파벳으로 앞서서, 그냥 정렬해
+          # 자르면 정작 보고 싶은 /brand/... 가 상한 밖으로 밀려난다 — 404 났던 것이 그쪽이다.
+          grep -ohE 'src="/[^"]+"' home.html login.html signup.html \
+            | sed -E 's/^src="//; s/"$//' | sort -u > assets-all.txt || true
+          { grep -v '^/_next/' assets-all.txt; grep '^/_next/' assets-all.txt; } \
+            | head -40 > assets.txt || true
+          echo "| 에셋 | HTTP |" > assets.md
+          echo "| --- | --- |" >> assets.md
+          while IFS= read -r asset; do
+            [ -n "$asset" ] || continue
+            code="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 30 "$BASE$asset" || echo 000)"
+            echo "| \`$asset\` | $code |" >> assets.md
+            case "$code" in
+              2*|3*) ;;
+              *) fail "화면이 부르는 $asset 가 HTTP $code 입니다" ;;
+            esac
+          done < assets.txt
+          cat assets.md
+
+          echo "bad=$bad" >> "$GITHUB_OUTPUT"
+          if [ "$bad" -gt 0 ]; then
+            echo "화면 안에서 $bad 건이 어긋납니다"
+            exit 1
+          fi
+          echo "화면 안까지 확인했습니다"
+
+      - name: 서버 환경변수 준비 확인
+        id: env
+        if: always()
+        env:
+          BASE: ${{ inputs.base_url || 'https://bandut-partner-platform.vercel.app' }}
+        run: |
+          set -uo pipefail
+          code="$(curl -sS -o auth.txt -w '%{http_code}' --max-time 30 \
+            -X POST -H 'content-type: application/json' \
+            -d '{"op":"register","args":[]}' "$BASE/api/auth" || echo 000)"
+          body="$(tr -d '\n' < auth.txt | head -c 300 || true)"
+          db=unknown
+          if [ "$code" = "503" ] && printf '%s' "$body" | grep -q '저장소가 아직 연결되지'; then
+            ready=no;      detail="DATABASE_URL 없음"
+          elif [ "$code" = "503" ] && printf '%s' "$body" | grep -q '문자 발송이 아직 연결되지'; then
+            # 이 줄까지 왔다는 것은 앞의 두 검사를 전부 지났다는 뜻이다 — 핸들러가 그 순서로 본다.
+            ready=no;      detail="두 값(DATABASE_URL·ADMIN_PASSWORD)은 설정됨 — 인증번호를 전달할 방법이 없어 가입만 막혀 있다 (프리뷰는 AUTH_DEV_OTP=on, 운영은 SMS_* 셋)"
+          elif [ "$code" = "503" ] && printf '%s' "$body" | grep -q 'ADMIN_PASSWORD'; then
+            ready=no;      detail="ADMIN_PASSWORD 없음 또는 8자 미만 또는 시연값"
+          elif [ "$code" = "503" ] && printf '%s' "$body" | grep -q '저장소 오류'; then
+            ready=no;      detail="두 값은 설정됨 — 그런데 DB 에 닿지 못한다"; db=fail
+          elif [ "$code" = "400" ]; then
+            ready=yes;     detail="두 값 모두 설정됨 · DB 왕복 확인 — 서버 전환 가능"; db=ok
+          elif [ "$code" = "404" ]; then
+            ready=unknown; detail="/api/auth 가 배포되어 있지 않음 (HTTP 404)"
+          elif [ "$code" = "405" ]; then
+            ready=unknown; detail="405 — 이 경로가 POST 를 받지 않는다. 라우트가 바뀌었는지 보라"
+          else
+            ready=unknown; detail="예상 못 한 응답 HTTP $code: $body"
+          fi
+          echo "ready=$ready" >> "$GITHUB_OUTPUT"
+          echo "detail=$detail" >> "$GITHUB_OUTPUT"
+          echo "db=$db" >> "$GITHUB_OUTPUT"
+          echo "서버 환경변수 준비: $ready — $detail (HTTP $code) — $body"
+          if [ "$ready" != "yes" ]; then
+            echo "::warning::라이브에 서버 환경변수가 아직 준비되지 않았습니다 — $detail (docs/rounds/28-68/서버_연결.md)"
+          fi
+
+      # 29-19: HTTP 로 재는 것과 브라우저로 여는 것은 다르다. 29-16-1 이 그 틈에서 나왔다 —
+      # /companies 는 200 이었고 HTML 도 맞았는데 브라우저로 열면 아이콘이 글줄을 밀어내고 있었다.
+      #
+      # `base_url` 을 준 경우에만 돈다. 프로덕션은 아직 옛 SPA 라 어떤 경로든 index.html 을 주고,
+      # 그 위에서는 이 검사가 뜻이 없다. 전환 뒤에 조건을 푼다.
+      #
+      # 로그인하지 않고 쓰지도 않는다 — 배포된 DB 에 아무것도 남기지 않는다.
+      # 29-20-2: 브라우저는 두 단계가 함께 쓴다. 처음에는 `browser` 에만 묶어 놨는데,
+      # `signup` 만 켜고 돌리자 봇이 playwright-core 를 못 찾고 죽었다. 둘 중 하나면 설치한다.
+      - name: Playwright 설치 (모듈 + chromium)
+        if: (inputs.browser || inputs.signup) && inputs.base_url != ''
+        timeout-minutes: 6
+        run: |
+          set -euo pipefail
+          npm i --no-save --no-audit --no-fund --fetch-timeout=60000 --fetch-retries=4 playwright@1.49.1
+          npx playwright install chromium
+
+      - name: 배포 화면 검사 (브라우저)
+        if: inputs.browser && inputs.base_url != ''
+        timeout-minutes: 8
+        env:
+          BASE_URL: ${{ inputs.base_url }}
+        run: node scripts/e2e-live-ui.mjs
+
+      # 29-20: 가입 → 승인 → 권한을 **배포된 프리뷰에서** 돈다. 계정이 실제로 만들어지므로
+      # 프리뷰 DB 가 운영과 갈라져 있다는 것이 먼저 확인돼야 했다(29-17 표식 대조에서 끝났다).
+      #
+      # 관리자 비밀번호는 저장소에 없다. 저장소 비밀값으로 받는다 — 사장님이 GitHub 에
+      # 직접 넣으시고, 로그에도 우리 눈에도 값이 보이지 않는다. 없으면 이 단계는 건너뛴다.
+      # 29-21: 가입 코드를 없애 그쪽 비밀값은 더 이상 쓰지 않는다.
+      #
+      # 운영 주소로 향하면 스크립트가 먼저 거부한다(PRODUCTION_HOSTS).
+      - name: 가입→승인 브라우저 왕복 (배포된 프리뷰)
+        if: inputs.signup && inputs.base_url != ''
+        timeout-minutes: 10
+        env:
+          BASE_URL: ${{ inputs.base_url }}
+          ADMIN_PASSWORD: ${{ secrets.PREVIEW_ADMIN_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [ -z "${ADMIN_PASSWORD:-}" ]; then
+            echo "::warning::저장소 비밀값(PREVIEW_ADMIN_PASSWORD)이 없어 건너뜁니다"
+            exit 0
+          fi
+          node scripts/e2e-signup.mjs
+
+      - name: 요약
+        if: always()
+        env:
+          ROUND: ${{ steps.expect.outputs.round }}
+          MODE: ${{ steps.live.outputs.mode }}
+          ENV_READY: ${{ steps.env.outputs.ready }}
+          ENV_DETAIL: ${{ steps.env.outputs.detail }}
+          ENV_DB: ${{ steps.env.outputs.db }}
+          PATHS_BAD: ${{ steps.paths.outputs.bad }}
+          CONTENT_BAD: ${{ steps.content.outputs.bad }}
+          BASE: ${{ inputs.base_url || 'https://bandut-partner-platform.vercel.app' }}
+        run: |
+          {
+            echo "### 배포 확인"
+            echo "- 주소: $BASE/"
+            echo "- 기대 라운드: \`$ROUND\`"
+            echo "- 서빙 인증 모드: \`${MODE:-확인 못 함}\`"
+            echo "- 서버 환경변수 준비: \`${ENV_READY:-확인 못 함}\` — ${ENV_DETAIL:-}"
+            echo "- DB 실제 연결: \`${ENV_DB:-확인 못 함}\`"
+            echo "- 살아 있지 않은 경로: \`${PATHS_BAD:-확인 못 함}\`개"
+            echo "- 화면 안에서 어긋난 것: \`${CONTENT_BAD:-확인 못 함}\`건"
+            if [ "${MODE:-}" = "local" ]; then
+              echo "- ⚠️ 로컬 모드입니다 — 서버 계정·세션 API는 라이브에서 실행되지 않습니다."
+            fi
+            echo "- 결과: ${{ job.status }}"
+          } >> "$GITHUB_STEP_SUMMARY"

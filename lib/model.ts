@@ -1,0 +1,9 @@
+export type Role='CUSTOMER'|'PARTNER'|'ADMIN';
+export interface User {id:string; email:string; name:string; role:Role; phone:string|null; suspended:number;created_at:string}
+export interface Order {id:string;customer_id:string;title:string;work_items:string;description:string;region:string;address?:string;phone?:string;desired_date:string|null;budget:number|null;deadline:string;answers:string;review_status:string;review_completed_at:string|null;routing_status:string;routing_decision:string|null;status:string;selected_bid_id:string|null;created_at:string;updated_at:string;revision:number;bid_count?:number|undefined;scheduled_date?:string|null;scheduled_start?:number|null;scheduled_end?:number|null}
+export interface Bid {id:string;order_id:string;partner_id:string;labor_cost:number;material_cost:number;transport_cost:number;discount:number;vat:number;total:number;included:string;excluded:string;message:string;available_date:string;start_hour:number;end_hour:number;status:string;created_at:string;updated_at:string;company?:string;representative?:string;work_items?:string;regions?:string}
+export interface Partner {user_id:string;company:string;representative:string;work_items:string;regions:string;status:string;approved_by:string|null;approved_at:string|null;account_status:string;partner_type:'business'|'individual'}
+export interface Audit {id:string;actor_id:string;role:string;order_id:string|null;action:string;before_state:string|null;after_state:string|null;reason:string;created_at:string}
+export interface Photo {id:string;order_id:string;owner_id:string;object_key:string;mime:string;created_at:string;expires_at:string}
+export interface Statement {bind(...values:unknown[]):Statement;first<T>():Promise<T|null>;all<T>():Promise<{results:T[]}>;run():Promise<{meta:{changes:number}}>}
+export interface Database {prepare(sql:string):Statement;batch(stmts:Statement[]):Promise<unknown[]>}

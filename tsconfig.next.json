@@ -1,0 +1,39 @@
+{
+  "//": "29-3: Next.js 빌드 전용 타입 검사. app/·components/는 v17 원본이라 원본과 대조 가능해야 해서 v17의 설정을 따른다. 테스트와 옛 SPA(src/)는 여기서 보지 않는다 — 각각 tsconfig.api.json(우리 서버 코드, 더 엄격)과 tsconfig.spa.json이 본다. next.config.ts의 typescript.tsconfigPath가 이 파일을 가리키므로 Next.js가 루트 tsconfig.json을 덮어쓰지 않는다.",
+  "compilerOptions": {
+    "target": "ES2017",
+    "lib": ["dom", "dom.iterable", "esnext"],
+    "allowJs": true,
+    "skipLibCheck": true,
+    "strict": true,
+    "noEmit": true,
+    "esModuleInterop": true,
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "jsx": "react-jsx",
+    "incremental": true,
+    "plugins": [
+      {
+        "name": "next"
+      }
+    ],
+    "paths": {
+      "@/*": ["./*"]
+    }
+  },
+  "include": [
+    "next-env.d.ts",
+    "middleware.ts",
+    "app/**/*.ts",
+    "app/**/*.tsx",
+    "components/**/*.tsx",
+    "hooks/**/*.ts",
+    "lib/**/*.ts",
+    "server/**/*.ts",
+    ".next/types/**/*.ts",
+    ".next/dev/types/**/*.ts"
+  ],
+  "exclude": ["node_modules", "**/*.test.ts", "**/*.test.tsx", "src", "dist", ".next", "db", "scripts", "tests"]
+}

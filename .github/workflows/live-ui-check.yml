@@ -1,0 +1,66 @@
+# 29-19: 배포된 주소를 **브라우저로** 연다.
+#
+# deploy-check 는 HTTP 로만 잰다 — 상태 코드와 HTML 문자열이다. 29-16-1 이 그 틈에서 나왔다:
+# /companies 는 200 이었고 HTML 도 맞았는데 브라우저로 열면 아이콘이 글줄을 밀어내고 있었다.
+# e2e:layout 과 e2e:next 는 브라우저를 쓰지만 로컬 서버를 본다 — 배포된 인스턴스가 아니다.
+#
+# 개발 컨테이너에서는 이 검사를 돌릴 수 없다. 나가는 연결이 정책으로 막혀 있다(connect_rejected).
+# 러너는 그 밖에 있어 배포 주소를 직접 받는다.
+#
+# 로그인하지 않고 쓰지도 않는다 — 비밀번호는 Vercel 환경변수에만 있고 여기 없다.
+# 배포된 DB 에 아무것도 남기지 않는다.
+name: live-ui-check
+
+on:
+  workflow_dispatch:
+    inputs:
+      base_url:
+        description: '검사할 주소 (비우면 프로덕션)'
+        required: false
+        type: string
+
+concurrency:
+  group: live-ui-check
+  cancel-in-progress: false
+
+jobs:
+  live-ui:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Playwright 브라우저 캐시
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-1.49.1-chromium-${{ runner.os }}
+
+      - name: Playwright 설치 (모듈 + chromium)
+        timeout-minutes: 6
+        run: |
+          set -euo pipefail
+          npm i --no-save --no-audit --no-fund --fetch-timeout=60000 --fetch-retries=4 playwright@1.49.1
+          npx playwright install chromium
+
+      - name: 배포 화면 검사 (브라우저)
+        env:
+          BASE_URL: ${{ inputs.base_url || 'https://bandut-partner-platform.vercel.app' }}
+        run: node scripts/e2e-live-ui.mjs
+
+      - name: 요약
+        if: always()
+        env:
+          BASE_URL: ${{ inputs.base_url || 'https://bandut-partner-platform.vercel.app' }}
+        run: |
+          {
+            echo "### 배포 화면 검사"
+            echo ""
+            echo "주소: $BASE_URL"
+            echo ""
+            echo "로그인하지 않고, 쓰지 않는다. 공개 화면만 브라우저로 연다."
+          } >> "$GITHUB_STEP_SUMMARY"
